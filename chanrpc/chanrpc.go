@@ -42,7 +42,6 @@ type RetInfo struct {
 }
 
 type Client struct {
-	s               *Server
 	chanSyncRet     chan *RetInfo
 	ChanAsynRet     chan *RetInfo
 	pendingAsynCall int
@@ -153,17 +152,17 @@ func (s *Server) Go(id interface{}, args ...interface{}) {
 
 // goroutine safe
 func (s *Server) Call0(id interface{}, args ...interface{}) error {
-	return s.Open(0).Call0(id, args...)
+	return NewClient(0).Call0(s, id, args...)
 }
 
 // goroutine safe
 func (s *Server) Call1(id interface{}, args ...interface{}) (interface{}, error) {
-	return s.Open(0).Call1(id, args...)
+	return NewClient(0).Call1(s, id, args...)
 }
 
 // goroutine safe
 func (s *Server) CallN(id interface{}, args ...interface{}) ([]interface{}, error) {
-	return s.Open(0).CallN(id, args...)
+	return NewClient(0).CallN(s, id, args...)
 }
 
 func (s *Server) Close() {
@@ -176,13 +175,6 @@ func (s *Server) Close() {
 	}
 }
 
-// goroutine safe
-func (s *Server) Open(l int) *Client {
-	c := NewClient(l)
-	c.Attach(s)
-	return c
-}
-
 func NewClient(l int) *Client {
 	c := new(Client)
 	c.chanSyncRet = make(chan *RetInfo, 1)
@@ -190,11 +182,7 @@ func NewClient(l int) *Client {
 	return c
 }
 
-func (c *Client) Attach(s *Server) {
-	c.s = s
-}
-
-func (c *Client) call(ci *CallInfo, block bool) (err error) {
+func (c *Client) call(s *Server, ci *CallInfo, block bool) (err error) {
 	defer func() {
 		if r := recover(); r != nil {
 			err = r.(error)
@@ -202,10 +190,10 @@ func (c *Client) call(ci *CallInfo, block bool) (err error) {
 	}()
 
 	if block {
-		c.s.ChanCall <- ci
+		s.ChanCall <- ci
 	} else {
 		select {
-		case c.s.ChanCall <- ci:
+		case s.ChanCall <- ci:
 		default:
 			err = errors.New("chanrpc channel full")
 		}
@@ -213,13 +201,8 @@ func (c *Client) call(ci *CallInfo, block bool) (err error) {
 	return
 }
 
-func (c *Client) f(id interface{}, n int) (f interface{}, err error) {
-	if c.s == nil {
-		err = errors.New("server not attached")
-		return
-	}
-
-	f = c.s.functions[id]
+func (c *Client) f(s *Server, id interface{}, n int) (f interface{}, err error) {
+	f = s.functions[id]
 	if f == nil {
 		err = fmt.Errorf("function id %v: function not registered", id)
 		return
@@ -243,13 +226,13 @@ func (c *Client) f(id interface{}, n int) (f interface{}, err error) {
 	return
 }
 
-func (c *Client) Call0(id interface{}, args ...interface{}) error {
-	f, err := c.f(id, 0)
+func (c *Client) Call0(s *Server, id interface{}, args ...interface{}) error {
+	f, err := c.f(s, id, 0)
 	if err != nil {
 		return err
 	}
 
-	err = c.call(&CallInfo{
+	err = c.call(s, &CallInfo{
 		f:       f,
 		args:    args,
 		chanRet: c.chanSyncRet,
@@ -262,13 +245,13 @@ func (c *Client) Call0(id interface{}, args ...interface{}) error {
 	return ri.err
 }
 
-func (c *Client) Call1(id interface{}, args ...interface{}) (interface{}, error) {
-	f, err := c.f(id, 1)
+func (c *Client) Call1(s *Server, id interface{}, args ...interface{}) (interface{}, error) {
+	f, err := c.f(s, id, 1)
 	if err != nil {
 		return nil, err
 	}
 
-	err = c.call(&CallInfo{
+	err = c.call(s, &CallInfo{
 		f:       f,
 		args:    args,
 		chanRet: c.chanSyncRet,
@@ -281,13 +264,13 @@ func (c *Client) Call1(id interface{}, args ...interface{}) (interface{}, error)
 	return ri.ret, ri.err
 }
 
-func (c *Client) CallN(id interface{}, args ...interface{}) ([]interface{}, error) {
-	f, err := c.f(id, 2)
+func (c *Client) CallN(s *Server, id interface{}, args ...interface{}) ([]interface{}, error) {
+	f, err := c.f(s, id, 2)
 	if err != nil {
 		return nil, err
 	}
 
-	err = c.call(&CallInfo{
+	err = c.call(s, &CallInfo{
 		f:       f,
 		args:    args,
 		chanRet: c.chanSyncRet,
@@ -300,14 +283,14 @@ func (c *Client) CallN(id interface{}, args ...interface{}) ([]interface{}, erro
 	return assert(ri.ret), ri.err
 }
 
-func (c *Client) asynCall(id interface{}, args []interface{}, cb interface{}, n int) {
-	f, err := c.f(id, n)
+func (c *Client) asynCall(s *Server, id interface{}, args []interface{}, cb interface{}, n int) {
+	f, err := c.f(s, id, n)
 	if err != nil {
 		c.ChanAsynRet <- &RetInfo{err: err, cb: cb}
 		return
 	}
 
-	err = c.call(&CallInfo{
+	err = c.call(s, &CallInfo{
 		f:       f,
 		args:    args,
 		chanRet: c.ChanAsynRet,
@@ -319,7 +302,7 @@ func (c *Client) asynCall(id interface{}, args []interface{}, cb interface{}, n 
 	}
 }
 
-func (c *Client) AsynCall(id interface{}, _args ...interface{}) {
+func (c *Client) AsynCall(s *Server, id interface{}, _args ...interface{}) {
 	if len(_args) < 1 {
 		panic("callback function not found")
 	}
@@ -345,7 +328,7 @@ func (c *Client) AsynCall(id interface{}, _args ...interface{}) {
 		return
 	}
 
-	c.asynCall(id, args, cb, n)
+	c.asynCall(s, id, args, cb, n)
 	c.pendingAsynCall++
 }
 

@@ -104,8 +104,7 @@ func (s *Skeleton) AsynCall(server *chanrpc.Server, id interface{}, args ...inte
 		panic("invalid AsynCallLen")
 	}
 
-	s.client.Attach(server)
-	s.client.AsynCall(id, args...)
+	s.client.AsynCall(server, id, args...)
 }
 
 func (s *Skeleton) RegisterChanRPC(id interface{}, f interface{}) {
