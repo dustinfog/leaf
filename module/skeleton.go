@@ -60,7 +60,7 @@ func (s *Skeleton) Run(closeSig chan bool) {
 		case ci := <-s.commandServer.ChanCall:
 			s.commandServer.Exec(ci)
 		case cb := <-s.g.ChanCb:
-			s.g.Cb(cb)
+			cb()
 		case t := <-s.dispatcher.ChanTimer:
 			t.Cb()
 		}

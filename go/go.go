@@ -1,11 +1,11 @@
 package g
 
 import (
-	"container/list"
 	"github.com/name5566/leaf/conf"
 	"github.com/name5566/leaf/log"
+	"github.com/name5566/leaf/util/mpsc"
+	"go.uber.org/atomic"
 	"runtime"
-	"sync"
 )
 
 // one Go per goroutine (goroutine not safe)
@@ -14,16 +14,11 @@ type Go struct {
 	pendingGo int
 }
 
-type LinearGo struct {
-	f  func()
-	cb func()
-}
-
 type LinearContext struct {
-	g              *Go
-	linearGo       *list.List
-	mutexLinearGo  sync.Mutex
-	mutexExecution sync.Mutex
+	g        *Go
+	linearGo *mpsc.Queue
+	length   atomic.Int64
+	running  atomic.Bool
 }
 
 func New(l int) *Go {
@@ -35,46 +30,36 @@ func New(l int) *Go {
 func (g *Go) Go(f func(), cb func()) {
 	g.pendingGo++
 
-	go func() {
+	go g.run(f, cb)
+}
+
+func (g *Go) run(f func(), cb func()) {
+	func() {
 		defer func() {
-			g.ChanCb <- cb
-			if r := recover(); r != nil {
-				if conf.LenStackBuf > 0 {
-					buf := make([]byte, conf.LenStackBuf)
-					l := runtime.Stack(buf, false)
-					log.Error("%v: %s", r, buf[:l])
-				} else {
-					log.Error("%v", r)
-				}
-			}
+			g.ChanCb <- g.wrapCb(cb)
+			recoverPanic()
 		}()
 
 		f()
 	}()
 }
 
-func (g *Go) Cb(cb func()) {
-	defer func() {
-		g.pendingGo--
-		if r := recover(); r != nil {
-			if conf.LenStackBuf > 0 {
-				buf := make([]byte, conf.LenStackBuf)
-				l := runtime.Stack(buf, false)
-				log.Error("%v: %s", r, buf[:l])
-			} else {
-				log.Error("%v", r)
-			}
-		}
-	}()
+func (g *Go) wrapCb(cb func()) func() {
+	return func() {
+		defer func() {
+			g.pendingGo--
+			recoverPanic()
+		}()
 
-	if cb != nil {
-		cb()
+		if cb != nil {
+			cb()
+		}
 	}
 }
 
 func (g *Go) Close() {
 	for g.pendingGo > 0 {
-		g.Cb(<-g.ChanCb)
+		(<-g.ChanCb)()
 	}
 }
 
@@ -85,38 +70,40 @@ func (g *Go) Idle() bool {
 func (g *Go) NewLinearContext() *LinearContext {
 	c := new(LinearContext)
 	c.g = g
-	c.linearGo = list.New()
+	c.linearGo = mpsc.New()
 	return c
 }
 
 func (c *LinearContext) Go(f func(), cb func()) {
 	c.g.pendingGo++
 
-	c.mutexLinearGo.Lock()
-	c.linearGo.PushBack(&LinearGo{f: f, cb: cb})
-	c.mutexLinearGo.Unlock()
+	c.linearGo.Push(func() { c.g.run(f, cb) })
+	c.length.Inc()
+	if !c.running.Swap(true) {
+		go func() {
+		process:
+			for !c.linearGo.Empty() {
+				r := c.linearGo.Pop().(func())
+				r()
+				c.length.Dec()
+			}
 
-	go func() {
-		c.mutexExecution.Lock()
-		defer c.mutexExecution.Unlock()
-
-		c.mutexLinearGo.Lock()
-		e := c.linearGo.Remove(c.linearGo.Front()).(*LinearGo)
-		c.mutexLinearGo.Unlock()
-
-		defer func() {
-			c.g.ChanCb <- e.cb
-			if r := recover(); r != nil {
-				if conf.LenStackBuf > 0 {
-					buf := make([]byte, conf.LenStackBuf)
-					l := runtime.Stack(buf, false)
-					log.Error("%v: %s", r, buf[:l])
-				} else {
-					log.Error("%v", r)
-				}
+			c.running.Store(false)
+			if c.length.Load() > 0 && !c.running.Swap(true) {
+				goto process
 			}
 		}()
+	}
+}
 
-		e.f()
-	}()
+func recoverPanic() {
+	if r := recover(); r != nil {
+		if conf.LenStackBuf > 0 {
+			buf := make([]byte, conf.LenStackBuf)
+			l := runtime.Stack(buf, false)
+			log.Error("%v: %s", r, buf[:l])
+		} else {
+			log.Error("%v", r)
+		}
+	}
 }

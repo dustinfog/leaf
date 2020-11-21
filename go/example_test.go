@@ -18,7 +18,7 @@ func Example() {
 		fmt.Println(res)
 	})
 
-	d.Cb(<-d.ChanCb)
+	(<-d.ChanCb)()
 
 	// go 2
 	d.Go(func() {
@@ -47,8 +47,8 @@ func ExampleLinearContext() {
 		fmt.Println("2")
 	}, nil)
 
-	d.Cb(<-d.ChanCb)
-	d.Cb(<-d.ChanCb)
+	(<-d.ChanCb)()
+	(<-d.ChanCb)()
 
 	// linear
 	c := d.NewLinearContext()
