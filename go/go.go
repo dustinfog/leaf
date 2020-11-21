@@ -10,15 +10,20 @@ import (
 
 // one Go per goroutine (goroutine not safe)
 type Go struct {
-	ChanCb    chan func()
-	pendingGo int
+	ChanCb  chan func()
+	pending map[*Task]*Task
+}
+
+type Task struct {
+	f  func()
+	cb func()
 }
 
 type LinearContext struct {
-	g        *Go
-	linearGo *mpsc.Queue
-	length   atomic.Int64
-	running  atomic.Bool
+	g       *Go
+	tasks   *mpsc.Queue
+	length  atomic.Int64
+	running atomic.Bool
 }
 
 func New(l int) *Go {
@@ -28,63 +33,65 @@ func New(l int) *Go {
 }
 
 func (g *Go) Go(f func(), cb func()) {
-	g.pendingGo++
+	t := &Task{f, cb}
+	g.pending[t] = t
 
-	go g.run(f, cb)
+	go g.run(t)
 }
 
-func (g *Go) run(f func(), cb func()) {
+func (g *Go) run(t *Task) {
 	func() {
 		defer func() {
-			g.ChanCb <- g.wrapCb(cb)
+			g.ChanCb <- g.wrapCb(t)
 			recoverPanic()
 		}()
 
-		f()
+		t.f()
 	}()
 }
 
-func (g *Go) wrapCb(cb func()) func() {
+func (g *Go) wrapCb(t *Task) func() {
 	return func() {
 		defer func() {
-			g.pendingGo--
+			delete(g.pending, t)
 			recoverPanic()
 		}()
 
-		if cb != nil {
-			cb()
+		if t.cb != nil {
+			t.cb()
 		}
 	}
 }
 
 func (g *Go) Close() {
-	for g.pendingGo > 0 {
+	for len(g.pending) > 0 {
 		(<-g.ChanCb)()
 	}
 }
 
 func (g *Go) Idle() bool {
-	return g.pendingGo == 0
+	return len(g.pending) == 0
 }
 
 func (g *Go) NewLinearContext() *LinearContext {
 	c := new(LinearContext)
 	c.g = g
-	c.linearGo = mpsc.New()
+	c.tasks = mpsc.New()
 	return c
 }
 
 func (c *LinearContext) Go(f func(), cb func()) {
-	c.g.pendingGo++
+	t := &Task{f, cb}
+	c.g.pending[t] = t
 
-	c.linearGo.Push(func() { c.g.run(f, cb) })
+	c.tasks.Push(t)
 	c.length.Inc()
 	if !c.running.Swap(true) {
 		go func() {
 		process:
-			for !c.linearGo.Empty() {
-				r := c.linearGo.Pop().(func())
-				r()
+			for !c.tasks.Empty() {
+				t := c.tasks.Pop().(*Task)
+				c.g.run(t)
 				c.length.Dec()
 			}
 
